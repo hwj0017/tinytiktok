@@ -27,9 +27,9 @@ func AutoMigrate(db *gorm.DB) error {
 	if err := db.AutoMigrate(&account.Account{}, &video.Video{}, &video.Like{}, &video.Comment{}, &social.Social{}); err != nil {
 		return err
 	}
-	if result := db.Exec("CREATE INDEX idx_time_desc_id_asc ON videos (create_time DESC, id ASC)"); result.Error != nil {
-		return result.Error
-	}
+	// if result := db.Exec("CREATE INDEX idx_time_desc_id_asc ON videos (create_time DESC, id ASC)"); result.Error != nil {
+	// 	return result.Error
+	// }
 	return nil
 }
 

@@ -1,7 +1,7 @@
 package config
 
 import (
-	"io/ioutil"
+	"os"
 
 	"gopkg.in/yaml.v3"
 )
@@ -11,6 +11,10 @@ type Config struct {
 	Database DatabaseConfig `yaml:"database"`
 	Redis    RedisConfig    `yaml:"redis"`
 	RabbitMQ RabbitMQConfig `yaml:"rabbitmq"`
+	// 新增 AI 相关配置
+	VectorDB  VectorDBConfig  `yaml:"vector_db"`
+	Embedding EmbeddingConfig `yaml:"embedding"`
+	LLM       LLMConfig       `yaml:"llm_api"`
 }
 
 type ServerConfig struct {
@@ -39,8 +43,29 @@ type RabbitMQConfig struct {
 	Password string `yaml:"password"`
 }
 
+// VectorDBConfig 向量数据库配置 (Qdrant)
+type VectorDBConfig struct {
+	Host       string `yaml:"host"`
+	Port       int    `yaml:"port"`
+	Collection string `yaml:"collection"`
+}
+
+// EmbeddingConfig 本地向量化配置 (Ollama)
+type EmbeddingConfig struct {
+	Addr  string `yaml:"addr"`
+	Model string `yaml:"model"`
+}
+
+// LLMConfig 云端大模型 API 配置 (OpenAI/DeepSeek 等)
+type LLMConfig struct {
+	Provider string `yaml:"provider"`
+	BaseURL  string `yaml:"base_url"`
+	APIKey   string `yaml:"api_key"`
+	Model    string `yaml:"model"`
+}
+
 func Load(filename string) (Config, error) {
-	data, err := ioutil.ReadFile(filename)
+	data, err := os.ReadFile(filename)
 	if err != nil {
 		return Config{}, err
 	}

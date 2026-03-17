@@ -20,3 +20,20 @@ rabbitmq:
   username: admin
   password: password123
   
+vector_db:
+  host: localhost
+  port: 6334           # 生产建议使用 gRPC 端口 (6334) 性能更高
+  http_port: 6333      # 用于 Dashboard 或简单 REST 调试
+  collection: video_rag_chunks
+  timeout: 5s
+embedding:
+  addr: http://localhost:11434
+  model: bge-m3
+  dimension: 1024
+# 大模型 API (逻辑大脑，可随时插拔)
+llm_api:
+  provider: openai        # 或 deepseek, qwen 等
+  base_url: https://api.openai.com/v1
+  api_key: sk-xxxxxxx     # 建议生产环境用环境变量加载
+  model: gpt-4o-mini      # 或 deepseek-chat
+  timeout: 30s
