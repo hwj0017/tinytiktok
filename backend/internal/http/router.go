@@ -2,19 +2,25 @@ package http
 
 import (
 	"feedsystem_video_go/internal/account"
+	"feedsystem_video_go/internal/agent"
+	"feedsystem_video_go/internal/agent/skill"
+
 	"feedsystem_video_go/internal/feed"
+	"feedsystem_video_go/internal/middleware/embedding"
 	"feedsystem_video_go/internal/middleware/jwt"
 	"feedsystem_video_go/internal/middleware/rabbitmq"
 	rediscache "feedsystem_video_go/internal/middleware/redis"
+	"feedsystem_video_go/internal/middleware/vectordb"
 	"feedsystem_video_go/internal/social"
 	"feedsystem_video_go/internal/video"
 	"log"
 
 	"github.com/gin-gonic/gin"
+	"github.com/tmc/langchaingo/llms"
 	"gorm.io/gorm"
 )
 
-func SetRouter(db *gorm.DB, cache *rediscache.Client, rmq *rabbitmq.RabbitMQ) *gin.Engine {
+func SetRouter(db *gorm.DB, cache *rediscache.Client, rmq *rabbitmq.RabbitMQ, emb *embedding.EmbeddingProvider, vectordb *vectordb.VectorDBProvider, llm llms.Model) *gin.Engine {
 	r := gin.Default()
 	r.Static("/static", "./.run/uploads")
 	// account
@@ -42,7 +48,12 @@ func SetRouter(db *gorm.DB, cache *rediscache.Client, rmq *rabbitmq.RabbitMQ) *g
 		log.Printf("PopularityMQ init failed (mq disabled): %v", err)
 		popularityMQ = nil
 	}
-	videoService := video.NewVideoService(videoRepository, cache, popularityMQ)
+	ragMQ, err := rabbitmq.NewRagMQ(rmq)
+	if err != nil {
+		log.Printf("RagMQ init failed (mq disabled): %v", err)
+		ragMQ = nil
+	}
+	videoService := video.NewVideoService(videoRepository, cache, popularityMQ, ragMQ)
 	videoHandler := video.NewVideoHandler(videoService, accountService)
 	videoGroup := r.Group("/video")
 	{
@@ -55,6 +66,7 @@ func SetRouter(db *gorm.DB, cache *rediscache.Client, rmq *rabbitmq.RabbitMQ) *g
 		protectedVideoGroup.POST("/uploadVideo", videoHandler.UploadVideo)
 		protectedVideoGroup.POST("/uploadCover", videoHandler.UploadCover)
 		protectedVideoGroup.POST("/publish", videoHandler.PublishVideo)
+		protectedVideoGroup.POST("/delete", videoHandler.DeleteVideo)
 	}
 	// like
 	likeMQ, err := rabbitmq.NewLikeMQ(rmq)
@@ -127,5 +139,10 @@ func SetRouter(db *gorm.DB, cache *rediscache.Client, rmq *rabbitmq.RabbitMQ) *g
 	{
 		protectedFeedGroup.POST("/listByFollowing", feedHandler.ListByFollowing)
 	}
+
+	AIChatService := agent.NewAIChatService(llm, skill.NewSearchVideoTool(emb, vectordb), skill.NewSearchWeatherTool())
+	AIChatHandler := agent.NewAIChatHandler(AIChatService)
+	AIGroup := r.Group("/ai")
+	AIGroup.POST("/chat", AIChatHandler.Chat)
 	return r
 }

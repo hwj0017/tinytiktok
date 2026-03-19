@@ -11,6 +11,7 @@ import (
 
 	"feedsystem_video_go/internal/middleware/rabbitmq"
 	rediscache "feedsystem_video_go/internal/middleware/redis"
+	"golang.org/x/sync/singleflight" // 需要引入此包
 )
 
 type VideoService struct {
@@ -18,10 +19,12 @@ type VideoService struct {
 	cache        *rediscache.Client
 	cacheTTL     time.Duration
 	popularityMQ *rabbitmq.PopularityMQ
+	ragMQ        *rabbitmq.RagMQ
+	sf           singleflight.Group // 用于合并请求
 }
 
-func NewVideoService(repo *VideoRepository, cache *rediscache.Client, popularityMQ *rabbitmq.PopularityMQ) *VideoService {
-	return &VideoService{repo: repo, cache: cache, cacheTTL: 5 * time.Minute, popularityMQ: popularityMQ}
+func NewVideoService(repo *VideoRepository, cache *rediscache.Client, popularityMQ *rabbitmq.PopularityMQ, ragMQ *rabbitmq.RagMQ) *VideoService {
+	return &VideoService{repo: repo, cache: cache, cacheTTL: 5 * time.Minute, popularityMQ: popularityMQ, ragMQ: ragMQ}
 }
 
 func (vs *VideoService) Publish(ctx context.Context, video *Video) error {
@@ -44,6 +47,9 @@ func (vs *VideoService) Publish(ctx context.Context, video *Video) error {
 	if err := vs.repo.CreateVideo(ctx, video); err != nil {
 		return err
 	}
+	if err := vs.ragMQ.PublishTask(ctx, video.ID, rabbitmq.ActionPublish); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -59,6 +65,9 @@ func (vs *VideoService) Delete(ctx context.Context, id uint, authorID uint) erro
 		return errors.New("unauthorized")
 	}
 	if err := vs.repo.DeleteVideo(ctx, id); err != nil {
+		return err
+	}
+	if err := vs.ragMQ.PublishTask(ctx, id, rabbitmq.ActionDelete); err != nil {
 		return err
 	}
 	if vs.cache != nil {
@@ -79,88 +88,70 @@ func (vs *VideoService) ListByAuthorID(ctx context.Context, authorID uint) ([]Vi
 func (vs *VideoService) GetDetail(ctx context.Context, id uint) (*Video, error) {
 	cacheKey := fmt.Sprintf("video:detail:id=%d", id)
 
-	getCached := func() (*Video, bool) {
-		opCtx, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
-		defer cancel()
-
-		b, err := vs.cache.GetBytes(opCtx, cacheKey)
-		if err != nil {
-			return nil, false
-		}
-		var cached Video
-		if err := json.Unmarshal(b, &cached); err != nil {
-			return nil, false
-		}
-		return &cached, true
-	}
-
-	setCached := func(video *Video) {
-		b, err := json.Marshal(video)
-		if err != nil {
-			return
-		}
-		opCtx, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
-		defer cancel()
-		_ = vs.cache.SetBytes(opCtx, cacheKey, b, vs.cacheTTL)
-	}
-
+	// 1. 尝试从缓存获取
 	if vs.cache != nil {
-		if v, ok := getCached(); ok {
+		if v, ok := vs.getCached(ctx, cacheKey); ok {
 			return v, nil
 		}
-
-		opCtx, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
-		b, err := vs.cache.GetBytes(opCtx, cacheKey)
-		cancel()
-		if err == nil {
-			var cached Video
-			if err := json.Unmarshal(b, &cached); err == nil {
-				return &cached, nil
-			}
-		} else if rediscache.IsMiss(err) {
-			lockKey := "lock:" + cacheKey
-
-			lockCtx, lockCancel := context.WithTimeout(ctx, 50*time.Millisecond)
-			token, locked, lockErr := vs.cache.Lock(lockCtx, lockKey, 2*time.Second)
-			lockCancel()
-
-			if lockErr == nil && locked {
-				defer func() { _ = vs.cache.Unlock(context.Background(), lockKey, token) }()
-
-				if v, ok := getCached(); ok {
-					return v, nil
-				}
-
-				video, err := vs.repo.GetByID(ctx, id)
-				if err != nil {
-					return nil, err
-				}
-				setCached(video)
-				return video, nil
-			}
-
-			// 没拿到锁：等待别人回填缓存
-			for i := 0; i < 5; i++ {
-				select {
-				case <-ctx.Done():
-					return nil, ctx.Err()
-				case <-time.After(20 * time.Millisecond):
-				}
-				if v, ok := getCached(); ok {
-					return v, nil
-				}
-			}
-		}
 	}
 
-	video, err := vs.repo.GetByID(ctx, id)
+	// 2. 缓存缺失，使用 singleflight 合并并发请求
+	// 返回值：v 为结果，err 为错误，shared 表示结果是否为多个调用者共享
+	v, err, _ := vs.sf.Do(cacheKey, func() (interface{}, error) {
+		// 【双重检查模式】进入 singleflight 后再查一次缓存，
+		// 这样同一时刻进来的其他协程在第一个协程填补完缓存后，可以直接拿走结果。
+		if vs.cache != nil {
+			if cachedV, ok := vs.getCached(ctx, cacheKey); ok {
+				return cachedV, nil
+			}
+		}
+
+		// 3. 从数据库读取
+		video, err := vs.repo.GetByID(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+
+		// 4. 回填缓存
+		if vs.cache != nil {
+			vs.setCached(ctx, cacheKey, video)
+		}
+
+		return video, nil
+	})
+
 	if err != nil {
 		return nil, err
 	}
-	if vs.cache != nil {
-		setCached(video)
+
+	return v.(*Video), nil
+}
+
+// 辅助函数：封装获取逻辑
+func (vs *VideoService) getCached(ctx context.Context, key string) (*Video, bool) {
+	opCtx, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
+	defer cancel()
+
+	b, err := vs.cache.GetBytes(opCtx, key)
+	if err != nil {
+		return nil, false
 	}
-	return video, nil
+	var cached Video
+	if err := json.Unmarshal(b, &cached); err != nil {
+		return nil, false
+	}
+	return &cached, true
+}
+
+// 辅助函数：封装设置逻辑
+func (vs *VideoService) setCached(ctx context.Context, key string, video *Video) {
+	b, err := json.Marshal(video)
+	if err != nil {
+		return
+	}
+	opCtx, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
+	defer cancel()
+	_ = vs.cache.SetBytes(opCtx, key, b, vs.cacheTTL)
 }
 
 func (vs *VideoService) UpdateLikesCount(ctx context.Context, id uint, likesCount int64) error {

@@ -1,111 +1,56 @@
 package agent
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
-	"github.com/qdrant/go-client/qdrant"
-	"net/http"
-	"time"
+	"log"
+
+	"github.com/tmc/langchaingo/agents"
+	"github.com/tmc/langchaingo/callbacks"
+	"github.com/tmc/langchaingo/chains"
+	"github.com/tmc/langchaingo/llms"
+	"github.com/tmc/langchaingo/tools"
 )
 
-// OllamaEmbedRequest 对应 Ollama /api/embed 的请求体
-type OllamaEmbedRequest struct {
-	Model string `json:"model"`
-	Input string `json:"input"`
+type AIChatService struct {
+	llmModel llms.Model
+	tools    []tools.Tool // 👈 核心改变：使用工具接口的切片
 }
 
-// OllamaEmbedResponse 对应 Ollama /api/embed 的响应体
-type OllamaEmbedResponse struct {
-	Model      string      `json:"model"`
-	Embeddings [][]float32 `json:"embeddings"` // 注意：Ollama 返回的是嵌套数组
+// NewAIChatService 使用可变参数（...）来接收任意数量的工具
+func NewAIChatService(llmModel llms.Model, opts ...tools.Tool) *AIChatService {
+	return &AIChatService{
+		llmModel: llmModel,
+		tools:    opts, // 可以是 0 个，也可以是 100 个
+	}
 }
 
-type AgentService struct {
-	QdrantClient *qdrant.Client
-}
+// ChatWithAgent 核心对话接口
+func (s *AIChatService) ChatWithAgent(ctx context.Context, userInput string) (string, error) {
+	// 1. 定义你专属的 System Prompt (这就是 Prefix)
+	mySystemPrompt := `你是一个专业的游戏视频平台 AI 助手。警告：当你输出完 Action 和 Action Input 后，严禁自行生成 Observation！`
 
-// SearchVideoKnowledge 作为 Skill 的底层实现
-func (s *AgentService) SearchVideoKnowledge(ctx context.Context, query string) (string, error) {
-	// 1. 获取向量 (假设已经有了 embedding 逻辑)
-	vector, _ := s.getEmbedding(ctx, query)
-
-	// 2. 检索 Qdrant
-	searchResult, err := s.QdrantClient.Query(ctx, &qdrant.QueryPoints{
-		CollectionName: "video_rag_chunks",
-		Query:          qdrant.NewQuery(vector...),
-		Limit:          qdrant.PtrOf(uint64(3)),
-		WithPayload:    qdrant.NewWithPayload(true),
-	})
+	// 2. 初始化 Agent，并把你的 Prompt 注入进去
+	executor, err := agents.Initialize(
+		s.llmModel,
+		s.tools,
+		agents.ZeroShotReactDescription, // 依然使用 ReAct 框架
+		agents.WithMaxIterations(3),
+		// 👇 核心代码：替换默认的系统提示词开头！
+		agents.WithPromptPrefix(mySystemPrompt),
+	)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("初始化 Agent 失败: %w", err)
 	}
 
-	// 3. 格式化输出
-	var contextText string
-	for _, hit := range searchResult {
-		p := hit.Payload
+	log.Printf("🤖 [Agent 启动] 接收到提问: %s", userInput)
 
-		// 从 Qdrant 取出的是 float64，转换回 uint64 毫秒
-		startMs := uint64(p["start_time"].GetDoubleValue())
-
-		// 转换成人类易读的格式，例如 12500ms -> 12.5s
-		seconds := float64(startMs) / 1000.0
-
-		contextText += fmt.Sprintf("[视频:%s, 时间:%.1fs]: %s\n",
-			p["video_id"].GetStringValue(),
-			seconds,
-			p["text"].GetStringValue())
-	}
-
-	return contextText, nil
-}
-
-// getEmbedding 调用本地 Ollama 服务将文本转换为向量
-func (s *AgentService) getEmbedding(ctx context.Context, text string) ([]float32, error) {
-	// 1. 构造请求体
-	reqBody := OllamaEmbedRequest{
-		Model: "bge-m3", // 确保你之前已经 ollama pull bge-m3
-		Input: text,
-	}
-
-	jsonData, err := json.Marshal(reqBody)
+	answer, err := chains.Run(ctx, executor, userInput, chains.WithCallback(callbacks.LogHandler{}))
 	if err != nil {
-		return nil, fmt.Errorf("序列化请求失败: %w", err)
+		fmt.Printf("❌ 大模型调用失败: %v\n", err)
+		return "", fmt.Errorf("Agent 运行异常: %w", err)
 	}
 
-	// 2. 创建 HTTP 请求 (带 Context 以后端最佳实践防止超时)
-	req, err := http.NewRequestWithContext(ctx, "POST", "http://localhost:11434/api/embed", bytes.NewBuffer(jsonData))
-	if err != nil {
-		return nil, fmt.Errorf("创建请求失败: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	// 3. 发送请求
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("请求 Ollama 失败: %w", err)
-	}
-	defer resp.Body.Close()
-
-	// 4. 检查状态码
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("Ollama 返回错误状态码: %d", resp.StatusCode)
-	}
-
-	// 5. 解析响应
-	var embedResp OllamaEmbedResponse
-	if err := json.NewDecoder(resp.Body).Decode(&embedResp); err != nil {
-		return nil, fmt.Errorf("解析响应 JSON 失败: %w", err)
-	}
-
-	// 6. 安全检查：确保返回了向量数据
-	if len(embedResp.Embeddings) == 0 || len(embedResp.Embeddings[0]) == 0 {
-		return nil, fmt.Errorf("Ollama 未返回任何向量数据")
-	}
-
-	// 返回第一个输入对应的向量
-	return embedResp.Embeddings[0], nil
+	log.Printf("✅ [Agent 完毕] 返回结果: %s", answer)
+	return answer, nil
 }

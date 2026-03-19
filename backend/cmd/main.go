@@ -5,8 +5,12 @@ import (
 	"feedsystem_video_go/internal/config"
 	"feedsystem_video_go/internal/db"
 	apphttp "feedsystem_video_go/internal/http"
+	"feedsystem_video_go/internal/middleware/embedding"
+	"feedsystem_video_go/internal/middleware/llm"
 	rabbitmq "feedsystem_video_go/internal/middleware/rabbitmq"
 	rediscache "feedsystem_video_go/internal/middleware/redis"
+	"feedsystem_video_go/internal/middleware/vectordb"
+
 	"log"
 	"strconv"
 	"time"
@@ -59,8 +63,29 @@ func main() {
 		log.Printf("RabbitMQ connected")
 	}
 
+	emb, err := embedding.NewEmbeddingProvider(cfg.Embedding)
+	if err != nil {
+		log.Printf("Embedding provider error (disabled): %v", err)
+		emb = nil
+	} else {
+		log.Printf("Embedding provider connected")
+	}
+	vdb, err := vectordb.NewVectorDBProvider(cfg.VectorDB)
+	if err != nil {
+		log.Printf("VectorDB provider error (disabled): %v", err)
+		vdb = nil
+	} else {
+		log.Printf("VectorDB provider connected")
+	}
+	llm, err := llm.NewLLM(cfg.LLM)
+	if err != nil {
+		log.Printf("LLM provider error (disabled): %v", err)
+		llm = nil
+	} else {
+		log.Printf("LLM provider connected")
+	}
 	// 设置路由
-	r := apphttp.SetRouter(sqlDB, cache, rmq)
+	r := apphttp.SetRouter(sqlDB, cache, rmq, emb, vdb, llm)
 	log.Printf("Server is running on port %d", cfg.Server.Port)
 	if err := r.Run(":" + strconv.Itoa(cfg.Server.Port)); err != nil {
 		log.Fatalf("Failed to run server: %v", err)

@@ -53,24 +53,24 @@ services:
       timeout: 5s
       retries: 20
 
-  backend:
-    build:
-      context: .
-      dockerfile: backend/Dockerfile
-      target: api
-    restart: always
-    ports:
-      - "8080:8080"
-    volumes:
-      - ./backend/configs/config.docker.yaml:/app/configs/config.yaml:ro
-      - backend_uploads:/app/.run/uploads
-    depends_on:
-      mysql:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-      rabbitmq:
-        condition: service_healthy
+  # backend:
+  #   build:
+  #     context: .
+  #     dockerfile: backend/Dockerfile
+  #     target: api
+  #   restart: always
+  #   ports:
+  #     - "8080:8080"
+  #   volumes:
+  #     - ./backend/configs/config.docker.yaml:/app/configs/config.yaml:ro
+  #     - backend_uploads:/app/.run/uploads
+  #   depends_on:
+  #     mysql:
+  #       condition: service_healthy
+  #     redis:
+  #       condition: service_healthy
+  #     rabbitmq:
+  #       condition: service_healthy
 
   worker:
     build:
@@ -88,19 +88,57 @@ services:
       rabbitmq:
         condition: service_healthy
 
-  frontend:
-    build:
-      context: .
-      dockerfile: frontend/Dockerfile
+  # frontend:
+  #   build:
+  #     context: .
+  #     dockerfile: frontend/Dockerfile
+  #   restart: always
+  #   ports:
+  #     - "5173:80"
+  #   depends_on:
+  #     - backend
+    
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
     restart: always
     ports:
-      - "5173:80"
-    depends_on:
-      - backend
-
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+  whisper:
+    image: fedirz/faster-whisper-server:latest-cuda # 如果没显卡用 latest-cpu
+    container_name: whisper
+    restart: always
+    ports:
+      - "9000:9000"
+    volumes:
+      - whisper_models:/root/.cache/huggingface # 某些镜像模型存放在此
+    environment:
+      - WHISPER_MODEL=base # 默认模型，可选 tiny, small, medium, large-v3
+      - AS_SERVICE=True
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: qdrant
+    restart: always
+    ports:
+      - "6333:6333"  # HTTP API (RESTful 接口，Qdrant 自带的可视化控制台也用这个)
+      - "6334:6334"  # gRPC API (你的 Go 代码底层依赖的高速通信接口，极其重要)
+    volumes:
+      - qdrant_data:/qdrant/storage  # Qdrant 官方默认的数据持久化路径
 volumes:
   mysql_data:
   redis_data:
   rabbitmq_data:
   backend_uploads:
+  # --- 新增模型相关数据卷 ---
+  ollama_data:        # 持久化 Ollama 下载的 Llama3, DeepSeek 等模型
+  whisper_models:     # 存放 Whisper 的权重文件（base, medium, large等）
+  huggingface_cache:  # 存放 Embedding 模型的缓存（避免重复下载 HF 模型）
+  qdrant_data:
 

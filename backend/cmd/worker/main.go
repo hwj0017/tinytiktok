@@ -4,7 +4,10 @@ import (
 	"context"
 	"feedsystem_video_go/internal/config"
 	"feedsystem_video_go/internal/db"
+	"feedsystem_video_go/internal/middleware/asr"
+	"feedsystem_video_go/internal/middleware/embedding"
 	rediscache "feedsystem_video_go/internal/middleware/redis"
+	"feedsystem_video_go/internal/middleware/vectordb"
 	"feedsystem_video_go/internal/social"
 	"feedsystem_video_go/internal/video"
 	"feedsystem_video_go/internal/worker"
@@ -34,6 +37,10 @@ const (
 	popularityExchange   = "video.popularity.events"
 	popularityQueue      = "video.popularity.events"
 	popularityBindingKey = "video.popularity.*"
+
+	ragExchange   = "video.rag.events"
+	ragQueue      = "video.rag.tasks" // 任务队列名
+	ragBindingKey = "video.rag.*"
 )
 
 func main() {
@@ -80,6 +87,18 @@ func main() {
 		log.Fatalf("Failed to open rabbitmq channel: %v", err)
 	}
 	defer ch.Close()
+	asr, err := asr.NewASRProvider(cfg.Asr)
+	if err != nil {
+		log.Printf("ASR config error (disabled): %v", err)
+	}
+	emb, err := embedding.NewEmbeddingProvider(cfg.Embedding)
+	if err != nil {
+		log.Printf("Embedding provider error (disabled): %v", err)
+	}
+	vectordb, err := vectordb.NewVectorDBProvider(cfg.VectorDB)
+	if err != nil {
+		log.Printf("VectorDB provider error (disabled): %v", err)
+	}
 	// 声明 Social 交换机和队列
 	if err := declareSocialTopology(ch); err != nil {
 		log.Fatalf("Failed to declare social topology: %v", err)
@@ -106,6 +125,7 @@ func main() {
 	commentRepo := video.NewCommentRepository(sqlDB)
 	likeWorker := worker.NewLikeWorker(ch, likeRepo, videoRepo, likeQueue)
 	commentWorker := worker.NewCommentWorker(ch, commentRepo, videoRepo, commentQueue)
+	ragWorker := worker.NewRagWorker(ch, asr, emb, vectordb, videoRepo, ragQueue)
 	var popularityWorker *worker.PopularityWorker
 	if cache != nil {
 		popularityWorker = worker.NewPopularityWorker(ch, cache, popularityQueue)
@@ -125,6 +145,8 @@ func main() {
 		log.Printf("Worker started, consuming queue=%s", popularityQueue)
 		go func() { errCh <- popularityWorker.Run(ctx) }()
 	}
+	log.Printf("Worker started, consuming queue=%s", ragQueue)
+	go func() { errCh <- ragWorker.Run(ctx) }()
 
 	err = <-errCh
 	if err != nil && err != context.Canceled {

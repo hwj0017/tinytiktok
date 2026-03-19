@@ -3,7 +3,7 @@ server:
 
 database:
   host: localhost
-  port: 3306
+  port: 3307
   user: root
   password: 123456
   dbname: feedsystem
@@ -30,10 +30,14 @@ embedding:
   addr: http://localhost:11434
   model: bge-m3
   dimension: 1024
+asr:
+  addr: http://localhost:9000   # 本地语音识别服务的 API 地址 (例如部署的 faster-whisper API)
+  model: whisper-large-v3       # 使用的语音模型名称 (如 whisper-base, whisper-large-v3 等)
+  language: zh
 # 大模型 API (逻辑大脑，可随时插拔)
 llm_api:
-  provider: openai        # 或 deepseek, qwen 等
-  base_url: https://api.openai.com/v1
-  api_key: sk-xxxxxxx     # 建议生产环境用环境变量加载
-  model: gpt-4o-mini      # 或 deepseek-chat
+  provider: minimax        # 或 deepseek, qwen 等
+  base_url: https://api.minimaxi.com/v1
+  api_key: sk-api-lVGdlOzOlBZScAOAVEz-IjOBeIC5OZ6zoIEs3RFQaGTwxJzcfYBrYTeDP9oOIk6EDQLabRTJCZ3XoWi_OXvtYfZ3sT4MzT9fW1GedpFbt2qe3IYcyzD5Qrg     # 建议生产环境用环境变量加载
+  model: MiniMax-M2      # 或 deepseek-chat
   timeout: 30s

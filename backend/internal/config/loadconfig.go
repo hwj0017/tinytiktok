@@ -12,6 +12,7 @@ type Config struct {
 	Redis    RedisConfig    `yaml:"redis"`
 	RabbitMQ RabbitMQConfig `yaml:"rabbitmq"`
 	// 新增 AI 相关配置
+	Asr       AsrConfig       `yaml:"asr"`
 	VectorDB  VectorDBConfig  `yaml:"vector_db"`
 	Embedding EmbeddingConfig `yaml:"embedding"`
 	LLM       LLMConfig       `yaml:"llm_api"`
@@ -41,6 +42,11 @@ type RabbitMQConfig struct {
 	Port     int    `yaml:"port"`
 	Username string `yaml:"username"`
 	Password string `yaml:"password"`
+}
+type AsrConfig struct {
+	Addr     string `yaml:"addr"`
+	Model    string `yaml:"model"`
+	Language string `yaml:"language"`
 }
 
 // VectorDBConfig 向量数据库配置 (Qdrant)

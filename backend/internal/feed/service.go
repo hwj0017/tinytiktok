@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"strconv"
 	"time"
+
+	"golang.org/x/sync/singleflight"
 )
 
 type FeedService struct {
@@ -15,6 +17,7 @@ type FeedService struct {
 	likeRepo *video.LikeRepository
 	cache    *rediscache.Client
 	cacheTTL time.Duration
+	sf       singleflight.Group
 }
 
 func NewFeedService(repo *FeedRepository, likeRepo *video.LikeRepository, cache *rediscache.Client) *FeedService {
@@ -23,7 +26,7 @@ func NewFeedService(repo *FeedRepository, likeRepo *video.LikeRepository, cache 
 
 // 查询最新视频
 func (f *FeedService) ListLatest(ctx context.Context, limit int, latestBefore time.Time, viewerAccountID uint) (ListLatestResponse, error) {
-	// 从数据库中查询最新视频
+	// 1. 定义从数据库加载数据的闭包 (封装原有逻辑)
 	doListLatestFromDB := func() (ListLatestResponse, error) {
 		videos, err := f.repo.ListLatest(ctx, limit, latestBefore)
 		if err != nil {
@@ -32,87 +35,88 @@ func (f *FeedService) ListLatest(ctx context.Context, limit int, latestBefore ti
 		var nextTime int64
 		if len(videos) > 0 {
 			nextTime = videos[len(videos)-1].CreateTime.Unix()
-		} else {
-			nextTime = 0
 		}
 		hasMore := len(videos) == limit
 		feedVideos, err := f.buildFeedVideos(ctx, videos, viewerAccountID)
 		if err != nil {
 			return ListLatestResponse{}, err
 		}
-		resp := ListLatestResponse{
+		return ListLatestResponse{
 			VideoList: feedVideos,
 			NextTime:  nextTime,
 			HasMore:   hasMore,
-		}
+		}, nil
+	}
+
+	// 2. 如果是登录用户，不走缓存，直接查库 (保持原逻辑)
+	if viewerAccountID != 0 || f.cache == nil {
+		return doListLatestFromDB()
+	}
+
+	// 3. 生成缓存 Key
+	before := int64(0)
+	if !latestBefore.IsZero() {
+		before = latestBefore.Unix()
+	}
+	cacheKey := fmt.Sprintf("feed:listLatest:limit=%d:before=%d", limit, before)
+
+	// 4. 第一层检查：直接查缓存 (Fast Path)
+	if resp, ok := f.getCached(ctx, cacheKey); ok {
 		return resp, nil
 	}
-	// 先从缓存中查询
-	var cacheKey string
-	if viewerAccountID == 0 && f.cache != nil {
-		before := int64(0)
-		if !latestBefore.IsZero() {
-			before = latestBefore.Unix()
-		}
-		cacheKey = fmt.Sprintf("feed:listLatest:limit=%d:before=%d", limit, before)
 
-		cacheCtx, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
-		defer cancel()
-
-		b, err := f.cache.GetBytes(cacheCtx, cacheKey)
-		if err == nil {
-			var cached ListLatestResponse
-			if err := json.Unmarshal(b, &cached); err == nil {
-				return cached, nil
-			}
-		} else if rediscache.IsMiss(err) { // 缓存未命中
-			lockKey := "lock:" + cacheKey
-			// 缓存未命中，尝试加锁
-			token, locked, _ := f.cache.Lock(cacheCtx, lockKey, 500*time.Millisecond)
-			if locked {
-				defer func() { _ = f.cache.Unlock(context.Background(), lockKey, token) }()
-				if b, err := f.cache.GetBytes(cacheCtx, cacheKey); err == nil {
-					var cached ListLatestResponse
-					if err := json.Unmarshal(b, &cached); err == nil {
-						return cached, nil
-					}
-				} else { // 缓存未命中，从数据库中查询
-					resp, err := doListLatestFromDB()
-					if err != nil {
-						return ListLatestResponse{}, err
-					}
-					if b, err := json.Marshal(resp); err == nil {
-						_ = f.cache.SetBytes(cacheCtx, cacheKey, b, f.cacheTTL)
-					}
-					return resp, nil
-				}
-			} else { // 缓存未命中，其他goroutine正在查询，等待
-				for i := 0; i < 5; i++ {
-					time.Sleep(20 * time.Millisecond)
-					if b, err := f.cache.GetBytes(cacheCtx, cacheKey); err == nil {
-						var cached ListLatestResponse
-						if err := json.Unmarshal(b, &cached); err == nil {
-							return cached, nil
-						}
-					}
-				}
-			}
+	// 5. 缓存未命中，使用 singleflight 合并请求
+	val, err, _ := f.sf.Do(cacheKey, func() (interface{}, error) {
+		// 【双重检查】进入 singleflight 后再查一次缓存
+		// 解决“前一个班车刚走，缓存还没写完/读到”的极小概率并发问题
+		if resp, ok := f.getCached(ctx, cacheKey); ok {
+			return resp, nil
 		}
-	}
-	// 缓存中没有查询到结果，从数据库中查询
-	resp, err := doListLatestFromDB()
+
+		// 查数据库
+		resp, err := doListLatestFromDB()
+		if err != nil {
+			return nil, err
+		}
+
+		// 回填缓存
+		f.setCached(ctx, cacheKey, resp)
+
+		return resp, nil
+	})
+
 	if err != nil {
 		return ListLatestResponse{}, err
 	}
-	// 缓存查询结果
-	if cacheKey != "" {
-		if b, err := json.Marshal(resp); err == nil {
-			cacheCtx, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
-			defer cancel()
-			_ = f.cache.SetBytes(cacheCtx, cacheKey, b, f.cacheTTL)
-		}
+
+	return val.(ListLatestResponse), nil
+}
+
+// --- 辅助方法，让主逻辑更干净 ---
+
+func (f *FeedService) getCached(ctx context.Context, key string) (ListLatestResponse, bool) {
+	cacheCtx, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
+	defer cancel()
+
+	b, err := f.cache.GetBytes(cacheCtx, key)
+	if err != nil {
+		return ListLatestResponse{}, false
 	}
-	return resp, nil
+	var cached ListLatestResponse
+	if err := json.Unmarshal(b, &cached); err == nil {
+		return cached, true
+	}
+	return ListLatestResponse{}, false
+}
+
+func (f *FeedService) setCached(ctx context.Context, key string, resp ListLatestResponse) {
+	b, err := json.Marshal(resp)
+	if err != nil {
+		return
+	}
+	cacheCtx, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
+	defer cancel()
+	_ = f.cache.SetBytes(cacheCtx, key, b, f.cacheTTL)
 }
 
 // 按照点赞数查询视频
@@ -142,92 +146,44 @@ func (f *FeedService) ListLikesCount(ctx context.Context, limit int, cursor *Lik
 
 // 按照关注列表查询视频
 func (f *FeedService) ListByFollowing(ctx context.Context, limit int, latestBefore time.Time, viewerAccountID uint) (ListByFollowingResponse, error) {
-	doListByFollowingFromDB := func() (ListByFollowingResponse, error) {
-		videos, err := f.repo.ListByFollowing(ctx, limit, viewerAccountID, latestBefore)
-		if err != nil {
-			return ListByFollowingResponse{}, err
-		}
-		var nextTime int64
-		if len(videos) > 0 {
-			nextTime = videos[len(videos)-1].CreateTime.Unix()
-		} else {
-			nextTime = 0
-		}
-		hasMore := len(videos) == limit
-		feedVideos, err := f.buildFeedVideos(ctx, videos, viewerAccountID)
-		if err != nil {
-			return ListByFollowingResponse{}, err
-		}
-		resp := ListByFollowingResponse{
-			VideoList: feedVideos,
-			NextTime:  nextTime,
-			HasMore:   hasMore,
-		}
-		return resp, nil
-	}
-	var cacheKey string
-	if viewerAccountID != 0 && f.cache != nil {
-		before := int64(0)
-		if !latestBefore.IsZero() {
-			before = latestBefore.Unix()
-		}
-		cacheKey = fmt.Sprintf("feed:listByFollowing:limit=%d:accountID=%d:before=%d", limit, viewerAccountID, before)
-		cacheCtx, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
-		defer cancel()
-
-		b, err := f.cache.GetBytes(cacheCtx, cacheKey)
-		if err == nil {
-			var cached ListByFollowingResponse
-			if err := json.Unmarshal(b, &cached); err == nil {
-				return cached, nil
-			}
-		} else if rediscache.IsMiss(err) { // 缓存未命中
-			lockKey := "lock:" + cacheKey
-			// 缓存未命中，尝试加锁
-			token, locked, _ := f.cache.Lock(cacheCtx, lockKey, 500*time.Millisecond)
-			if locked {
-				defer func() { _ = f.cache.Unlock(context.Background(), lockKey, token) }()
-				if b, err := f.cache.GetBytes(cacheCtx, cacheKey); err == nil {
-					var cached ListByFollowingResponse
-					if err := json.Unmarshal(b, &cached); err == nil {
-						return cached, nil
-					}
-				} else { // 缓存未命中，从数据库中查询
-					resp, err := doListByFollowingFromDB()
-					if err != nil {
-						return ListByFollowingResponse{}, err
-					}
-					if b, err := json.Marshal(resp); err == nil {
-						_ = f.cache.SetBytes(cacheCtx, cacheKey, b, f.cacheTTL)
-					}
-					return resp, nil
-				}
-			} else {
-				for i := 0; i < 5; i++ {
-					time.Sleep(20 * time.Millisecond)
-					if b, err := f.cache.GetBytes(cacheCtx, cacheKey); err == nil {
-						var cached ListByFollowingResponse
-						if err := json.Unmarshal(b, &cached); err == nil {
-							return cached, nil
-						}
-					}
-				}
-			}
-		}
+	// 1. 如果没有登录，关注列表为空（逻辑兜底）
+	if viewerAccountID == 0 {
+		return ListByFollowingResponse{
+			VideoList: make([]FeedVideoItem, 0),
+			NextTime:  0,
+			HasMore:   false,
+		}, nil
 	}
 
-	resp, err := doListByFollowingFromDB()
+	// 2. 直接从数据库查询
+	videos, err := f.repo.ListByFollowing(ctx, limit, viewerAccountID, latestBefore)
 	if err != nil {
 		return ListByFollowingResponse{}, err
 	}
-	if cacheKey != "" {
-		if b, err := json.Marshal(resp); err == nil {
-			cacheCtx, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
-			defer cancel()
-			_ = f.cache.SetBytes(cacheCtx, cacheKey, b, f.cacheTTL)
-		}
+
+	// 3. 计算分页游标 NextTime
+	var nextTime int64
+	if len(videos) > 0 {
+		nextTime = videos[len(videos)-1].CreateTime.Unix()
+	} else {
+		nextTime = 0
 	}
-	return resp, nil
+
+	// 4. 判断是否还有更多
+	hasMore := len(videos) == limit
+
+	// 5. 组装聚合数据（如点赞状态、作者信息等）
+	feedVideos, err := f.buildFeedVideos(ctx, videos, viewerAccountID)
+	if err != nil {
+		return ListByFollowingResponse{}, err
+	}
+
+	// 6. 构造返回结构
+	return ListByFollowingResponse{
+		VideoList: feedVideos,
+		NextTime:  nextTime,
+		HasMore:   hasMore,
+	}, nil
 }
 
 func (f *FeedService) ListByPopularity(ctx context.Context, limit int, reqAsOf int64, offset int, viewerAccountID uint, latestPopularity int64, latestBefore time.Time, latestIDBefore uint) (ListByPopularityResponse, error) {
