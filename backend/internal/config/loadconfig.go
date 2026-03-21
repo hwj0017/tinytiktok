@@ -51,9 +51,8 @@ type AsrConfig struct {
 
 // VectorDBConfig 向量数据库配置 (Qdrant)
 type VectorDBConfig struct {
-	Host       string `yaml:"host"`
-	Port       int    `yaml:"port"`
-	Collection string `yaml:"collection"`
+	Host string `yaml:"host"`
+	Port int    `yaml:"port"`
 }
 
 // EmbeddingConfig 本地向量化配置 (Ollama)

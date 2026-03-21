@@ -12,30 +12,30 @@ import (
 )
 
 type Client struct {
-	rdb *redis.Client
+	Rdb *redis.Client
 }
 
 func NewFromEnv(cfg *config.RedisConfig) (*Client, error) {
-	rdb := redis.NewClient(&redis.Options{
+	Rdb := redis.NewClient(&redis.Options{
 		Addr:     cfg.Host + ":" + strconv.Itoa(cfg.Port),
 		Password: cfg.Password,
 		DB:       cfg.DB,
 	})
-	return &Client{rdb: rdb}, nil
+	return &Client{Rdb: Rdb}, nil
 }
 
 func (c *Client) Close() error {
-	if c == nil || c.rdb == nil {
+	if c == nil || c.Rdb == nil {
 		return nil
 	}
-	return c.rdb.Close()
+	return c.Rdb.Close()
 }
 
 func (c *Client) Ping(ctx context.Context) error {
-	if c == nil || c.rdb == nil {
+	if c == nil || c.Rdb == nil {
 		return nil
 	}
-	return c.rdb.Ping(ctx).Err()
+	return c.Rdb.Ping(ctx).Err()
 }
 
 func IsMiss(err error) bool {
@@ -51,14 +51,14 @@ func randToken(n int) (string, error) {
 }
 
 func (c *Client) Lock(ctx context.Context, key string, ttl time.Duration) (token string, ok bool, err error) {
-	if c == nil || c.rdb == nil {
+	if c == nil || c.Rdb == nil {
 		return "", false, nil
 	}
 	token, err = randToken(16)
 	if err != nil {
 		return "", false, err
 	}
-	ok, err = c.rdb.SetNX(ctx, key, token, ttl).Result()
+	ok, err = c.Rdb.SetNX(ctx, key, token, ttl).Result()
 	return token, ok, err
 }
 
@@ -71,9 +71,9 @@ end
 `)
 
 func (c *Client) Unlock(ctx context.Context, key string, token string) error {
-	if c == nil || c.rdb == nil {
+	if c == nil || c.Rdb == nil {
 		return nil
 	}
-	_, err := unlockScript.Run(ctx, c.rdb, []string{key}, token).Result()
+	_, err := unlockScript.Run(ctx, c.Rdb, []string{key}, token).Result()
 	return err
 }

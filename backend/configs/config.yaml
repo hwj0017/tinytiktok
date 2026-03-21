@@ -24,7 +24,6 @@ vector_db:
   host: localhost
   port: 6334           # 生产建议使用 gRPC 端口 (6334) 性能更高
   http_port: 6333      # 用于 Dashboard 或简单 REST 调试
-  collection: video_rag_chunks
   timeout: 5s
 embedding:
   addr: http://localhost:11434
