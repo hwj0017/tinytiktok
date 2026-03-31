@@ -12,10 +12,12 @@ type Config struct {
 	Redis    RedisConfig    `yaml:"redis"`
 	RabbitMQ RabbitMQConfig `yaml:"rabbitmq"`
 	// 新增 AI 相关配置
-	Asr       AsrConfig       `yaml:"asr"`
-	VectorDB  VectorDBConfig  `yaml:"vector_db"`
-	Embedding EmbeddingConfig `yaml:"embedding"`
-	LLM       LLMConfig       `yaml:"llm_api"`
+	Asr           AsrConfig           `yaml:"asr"`
+	Ocr           OcrConfig           `yaml:"ocr"`
+	VectorDB      VectorDBConfig      `yaml:"vector_db"`
+	Embedding     EmbeddingConfig     `yaml:"embedding"`
+	LLM           LLMConfig           `yaml:"llm_api"`
+	Elasticsearch ElasticsearchConfig `yaml:"elasticsearch"`
 }
 
 type ServerConfig struct {
@@ -48,6 +50,9 @@ type AsrConfig struct {
 	Model    string `yaml:"model"`
 	Language string `yaml:"language"`
 }
+type OcrConfig struct {
+	Addr string `yaml:"addr"`
+}
 
 // VectorDBConfig 向量数据库配置 (Qdrant)
 type VectorDBConfig struct {
@@ -67,6 +72,11 @@ type LLMConfig struct {
 	BaseURL  string `yaml:"base_url"`
 	APIKey   string `yaml:"api_key"`
 	Model    string `yaml:"model"`
+}
+type ElasticsearchConfig struct {
+	Url      string `yaml:"url"`
+	Username string `yaml:"username"`
+	Password string `yaml:"password"`
 }
 
 func Load(filename string) (Config, error) {

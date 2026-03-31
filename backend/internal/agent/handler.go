@@ -8,7 +8,8 @@ import (
 
 // AIChatRequest 定义前端传过来的 JSON 请求体结构
 type AIChatRequest struct {
-	Query string `json:"query" binding:"required"`
+	Query     string `json:"query" binding:"required"`
+	SessionID uint   `json:"session_id"` // 可选：用于多轮对话的上下文关联
 }
 
 // AIChatHandler 控制器层，负责解析 HTTP 请求并调用底层 AI 服务
@@ -37,7 +38,7 @@ func (h *AIChatHandler) Chat(c *gin.Context) {
 	}
 
 	// 2. 将带有超时的 HTTP Context 透传给底层的 AI 服务
-	answer, err := h.chatService.ChatWithAgent(c.Request.Context(), req.Query)
+	answer, err := h.chatService.ChatWithAgent(c.Request.Context(), req.Query, req.SessionID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"code":  500,

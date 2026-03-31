@@ -9,7 +9,6 @@ import (
 	"strings"
 	"time"
 
-	"feedsystem_video_go/internal/account"
 	"feedsystem_video_go/internal/auth"
 	rediscache "feedsystem_video_go/internal/middleware/redis"
 
@@ -17,7 +16,7 @@ import (
 )
 
 // JWTAuth check jwt token and ensure it matches the currently stored token.
-func JWTAuth(accountRepo *account.AccountRepository, cache *rediscache.Client) gin.HandlerFunc {
+func JWTAuth(cache *rediscache.Client) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		authHeader := c.GetHeader("Authorization")
 		if authHeader == "" {
@@ -38,11 +37,11 @@ func JWTAuth(accountRepo *account.AccountRepository, cache *rediscache.Client) g
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "invalid or expired token"})
 			return
 		}
-		check(c, claims, tokenString, accountRepo, cache)
+		check(c, claims, tokenString, cache)
 	}
 }
 
-func SoftJWTAuth(accountRepo *account.AccountRepository, cache *rediscache.Client) gin.HandlerFunc {
+func SoftJWTAuth(cache *rediscache.Client) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		authHeader := c.GetHeader("Authorization")
 		if authHeader == "" {
@@ -64,11 +63,11 @@ func SoftJWTAuth(accountRepo *account.AccountRepository, cache *rediscache.Clien
 			return
 		}
 
-		check(c, claims, tokenString, accountRepo, cache)
+		check(c, claims, tokenString, cache)
 	}
 }
 
-func check(c *gin.Context, claims *auth.Claims, tokenString string, accountRepo *account.AccountRepository, cache *rediscache.Client) {
+func check(c *gin.Context, claims *auth.Claims, tokenString string, cache *rediscache.Client) {
 	key := fmt.Sprintf("account:%d", claims.AccountID)
 
 	// 先查 Redis
@@ -87,13 +86,6 @@ func check(c *gin.Context, claims *auth.Claims, tokenString string, accountRepo 
 			c.Next()
 			return
 		}
-	}
-
-	// Redis 故障/未启用：查 DB 兜底
-	accountInfo, err := accountRepo.FindByID(c.Request.Context(), claims.AccountID)
-	if err != nil || accountInfo.Token == "" || accountInfo.Token != tokenString {
-		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "token has been revoked"})
-		return
 	}
 
 	if cache != nil {

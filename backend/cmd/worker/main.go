@@ -5,7 +5,8 @@ import (
 	"feedsystem_video_go/internal/config"
 	"feedsystem_video_go/internal/db"
 	"feedsystem_video_go/internal/middleware/asr"
-	"feedsystem_video_go/internal/middleware/embedding"
+	"feedsystem_video_go/internal/middleware/elasticsearch"
+	"feedsystem_video_go/internal/middleware/ocr"
 	rediscache "feedsystem_video_go/internal/middleware/redis"
 	"feedsystem_video_go/internal/middleware/vectordb"
 	"feedsystem_video_go/internal/social"
@@ -91,13 +92,17 @@ func main() {
 	if err != nil {
 		log.Printf("ASR config error (disabled): %v", err)
 	}
-	emb, err := embedding.NewEmbeddingProvider(cfg.Embedding)
-	if err != nil {
-		log.Printf("Embedding provider error (disabled): %v", err)
-	}
-	vectordb, err := vectordb.NewVectorDBProvider(cfg.VectorDB)
+	vectordb, err := vectordb.NewVectorDBProvider(cfg.VectorDB, cfg.Embedding)
 	if err != nil {
 		log.Printf("VectorDB provider error (disabled): %v", err)
+	}
+	esClient, err := elasticsearch.NewClient(cfg.Elasticsearch)
+	if err != nil {
+		log.Printf("Elasticsearch client error (disabled): %v", err)
+	}
+	ocr, err := ocr.NewOCRProvider(cfg.Ocr)
+	if err != nil {
+		log.Printf("OCR config error (disabled): %v", err)
 	}
 	// 声明 Social 交换机和队列
 	if err := declareSocialTopology(ch); err != nil {
@@ -125,7 +130,7 @@ func main() {
 	commentRepo := video.NewCommentRepository(sqlDB)
 	likeWorker := worker.NewLikeWorker(ch, likeRepo, videoRepo, likeQueue)
 	commentWorker := worker.NewCommentWorker(ch, commentRepo, videoRepo, commentQueue)
-	ragWorker := worker.NewRagWorker(ch, asr, emb, vectordb, videoRepo, ragQueue)
+	videoWorker := worker.NewVideoWorker(ch, esClient, asr, ocr, vectordb)
 	var popularityWorker *worker.PopularityWorker
 	if cache != nil {
 		popularityWorker = worker.NewPopularityWorker(ch, cache, popularityQueue)
@@ -146,7 +151,7 @@ func main() {
 		go func() { errCh <- popularityWorker.Run(ctx) }()
 	}
 	log.Printf("Worker started, consuming queue=%s", ragQueue)
-	go func() { errCh <- ragWorker.Run(ctx) }()
+	go func() { errCh <- videoWorker.Run(ctx) }()
 
 	err = <-errCh
 	if err != nil && err != context.Canceled {

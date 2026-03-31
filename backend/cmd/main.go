@@ -5,7 +5,7 @@ import (
 	"feedsystem_video_go/internal/config"
 	"feedsystem_video_go/internal/db"
 	apphttp "feedsystem_video_go/internal/http"
-	"feedsystem_video_go/internal/middleware/embedding"
+	"feedsystem_video_go/internal/middleware/elasticsearch"
 	"feedsystem_video_go/internal/middleware/llm"
 	rabbitmq "feedsystem_video_go/internal/middleware/rabbitmq"
 	rediscache "feedsystem_video_go/internal/middleware/redis"
@@ -63,14 +63,7 @@ func main() {
 		log.Printf("RabbitMQ connected")
 	}
 
-	emb, err := embedding.NewEmbeddingProvider(cfg.Embedding)
-	if err != nil {
-		log.Printf("Embedding provider error (disabled): %v", err)
-		emb = nil
-	} else {
-		log.Printf("Embedding provider connected")
-	}
-	vdb, err := vectordb.NewVectorDBProvider(cfg.VectorDB)
+	vdb, err := vectordb.NewVectorDBProvider(cfg.VectorDB, cfg.Embedding)
 	if err != nil {
 		log.Printf("VectorDB provider error (disabled): %v", err)
 		vdb = nil
@@ -84,8 +77,15 @@ func main() {
 	} else {
 		log.Printf("LLM provider connected")
 	}
+	esClient, err := elasticsearch.NewClient(cfg.Elasticsearch)
+	if err != nil {
+		log.Printf("Elasticsearch client error (disabled): %v", err)
+		esClient = nil
+	} else {
+		log.Printf("Elasticsearch client connected")
+	}
 	// 设置路由
-	r := apphttp.SetRouter(sqlDB, cache, rmq, emb, vdb, llm)
+	r := apphttp.SetRouter(sqlDB, cache, rmq, vdb, llm, esClient)
 	log.Printf("Server is running on port %d", cfg.Server.Port)
 	if err := r.Run(":" + strconv.Itoa(cfg.Server.Port)); err != nil {
 		log.Fatalf("Failed to run server: %v", err)

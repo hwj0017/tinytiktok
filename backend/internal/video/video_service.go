@@ -19,12 +19,12 @@ type VideoService struct {
 	cache        *rediscache.Client
 	cacheTTL     time.Duration
 	popularityMQ *rabbitmq.PopularityMQ
-	ragMQ        *rabbitmq.RagMQ
+	videoMQ      *rabbitmq.VideoMQ
 	sf           singleflight.Group // 用于合并请求
 }
 
-func NewVideoService(repo *VideoRepository, cache *rediscache.Client, popularityMQ *rabbitmq.PopularityMQ, ragMQ *rabbitmq.RagMQ) *VideoService {
-	return &VideoService{repo: repo, cache: cache, cacheTTL: 5 * time.Minute, popularityMQ: popularityMQ, ragMQ: ragMQ}
+func NewVideoService(repo *VideoRepository, cache *rediscache.Client, popularityMQ *rabbitmq.PopularityMQ, videoMQ *rabbitmq.VideoMQ) *VideoService {
+	return &VideoService{repo: repo, cache: cache, cacheTTL: 5 * time.Minute, popularityMQ: popularityMQ, videoMQ: videoMQ}
 }
 
 func (vs *VideoService) Publish(ctx context.Context, video *Video) error {
@@ -47,7 +47,13 @@ func (vs *VideoService) Publish(ctx context.Context, video *Video) error {
 	if err := vs.repo.CreateVideo(ctx, video); err != nil {
 		return err
 	}
-	if err := vs.ragMQ.PublishTask(ctx, video.ID, rabbitmq.ActionPublish); err != nil {
+	if err := vs.videoMQ.PublishVideoCreated(ctx, rabbitmq.VideoCreatedEvent{
+		VideoID:     video.ID,
+		VloggerID:   video.AuthorID,
+		URL:         video.PlayURL,
+		Title:       video.Title,
+		Description: video.Description,
+	}); err != nil {
 		return err
 	}
 	return nil
@@ -67,7 +73,10 @@ func (vs *VideoService) Delete(ctx context.Context, id uint, authorID uint) erro
 	if err := vs.repo.DeleteVideo(ctx, id); err != nil {
 		return err
 	}
-	if err := vs.ragMQ.PublishTask(ctx, id, rabbitmq.ActionDelete); err != nil {
+	if err := vs.videoMQ.PublishVideoDeleted(ctx, rabbitmq.VideoDeletedEvent{
+		VideoID:   video.ID,
+		VloggerID: video.AuthorID,
+	}); err != nil {
 		return err
 	}
 	if vs.cache != nil {

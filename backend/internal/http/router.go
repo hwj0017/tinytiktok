@@ -6,13 +6,13 @@ import (
 	"feedsystem_video_go/internal/agent/skill"
 
 	"feedsystem_video_go/internal/feed"
-	"feedsystem_video_go/internal/middleware/embedding"
 	"feedsystem_video_go/internal/middleware/jwt"
 	"feedsystem_video_go/internal/middleware/rabbitmq"
 	rediscache "feedsystem_video_go/internal/middleware/redis"
 	"feedsystem_video_go/internal/middleware/vectordb"
 	"feedsystem_video_go/internal/social"
 	"feedsystem_video_go/internal/video"
+	"github.com/elastic/go-elasticsearch/v8"
 	"log"
 
 	"github.com/gin-gonic/gin"
@@ -20,7 +20,7 @@ import (
 	"gorm.io/gorm"
 )
 
-func SetRouter(db *gorm.DB, cache *rediscache.Client, rmq *rabbitmq.RabbitMQ, emb *embedding.EmbeddingProvider, vectordb *vectordb.VectorDBProvider, llm llms.Model) *gin.Engine {
+func SetRouter(db *gorm.DB, cache *rediscache.Client, rmq *rabbitmq.RabbitMQ, vectordb *vectordb.VectorDBProvider, llm llms.Model, esClient *elasticsearch.Client) *gin.Engine {
 	r := gin.Default()
 	r.Static("/static", "./.run/uploads")
 	// account
@@ -36,7 +36,7 @@ func SetRouter(db *gorm.DB, cache *rediscache.Client, rmq *rabbitmq.RabbitMQ, em
 		accountGroup.POST("/findByUsername", accountHandler.FindByUsername)
 	}
 	protectedAccountGroup := accountGroup.Group("")
-	protectedAccountGroup.Use(jwt.JWTAuth(accountRepository, cache))
+	protectedAccountGroup.Use(jwt.JWTAuth(cache))
 	{
 		protectedAccountGroup.POST("/logout", accountHandler.Logout)
 		protectedAccountGroup.POST("/rename", accountHandler.Rename)
@@ -48,7 +48,7 @@ func SetRouter(db *gorm.DB, cache *rediscache.Client, rmq *rabbitmq.RabbitMQ, em
 		log.Printf("PopularityMQ init failed (mq disabled): %v", err)
 		popularityMQ = nil
 	}
-	ragMQ, err := rabbitmq.NewRagMQ(rmq)
+	ragMQ, err := rabbitmq.NewVideoMQ(rmq)
 	if err != nil {
 		log.Printf("RagMQ init failed (mq disabled): %v", err)
 		ragMQ = nil
@@ -61,7 +61,7 @@ func SetRouter(db *gorm.DB, cache *rediscache.Client, rmq *rabbitmq.RabbitMQ, em
 		videoGroup.POST("/getDetail", videoHandler.GetDetail)
 	}
 	protectedVideoGroup := videoGroup.Group("")
-	protectedVideoGroup.Use(jwt.JWTAuth(accountRepository, cache))
+	protectedVideoGroup.Use(jwt.JWTAuth(cache))
 	{
 		protectedVideoGroup.POST("/uploadVideo", videoHandler.UploadVideo)
 		protectedVideoGroup.POST("/uploadCover", videoHandler.UploadCover)
@@ -79,7 +79,7 @@ func SetRouter(db *gorm.DB, cache *rediscache.Client, rmq *rabbitmq.RabbitMQ, em
 	likeHandler := video.NewLikeHandler(likeService)
 	likeGroup := r.Group("/like")
 	protectedLikeGroup := likeGroup.Group("")
-	protectedLikeGroup.Use(jwt.JWTAuth(accountRepository, cache))
+	protectedLikeGroup.Use(jwt.JWTAuth(cache))
 	{
 		protectedLikeGroup.POST("/like", likeHandler.Like)
 		protectedLikeGroup.POST("/unlike", likeHandler.Unlike)
@@ -100,7 +100,7 @@ func SetRouter(db *gorm.DB, cache *rediscache.Client, rmq *rabbitmq.RabbitMQ, em
 		commentGroup.POST("/listAll", commentHandler.GetAllComments)
 	}
 	protectedCommentGroup := commentGroup.Group("")
-	protectedCommentGroup.Use(jwt.JWTAuth(accountRepository, cache))
+	protectedCommentGroup.Use(jwt.JWTAuth(cache))
 	{
 		protectedCommentGroup.POST("/publish", commentHandler.PublishComment)
 		protectedCommentGroup.POST("/delete", commentHandler.DeleteComment)
@@ -116,7 +116,7 @@ func SetRouter(db *gorm.DB, cache *rediscache.Client, rmq *rabbitmq.RabbitMQ, em
 	socialHandler := social.NewSocialHandler(socialService)
 	socialGroup := r.Group("/social")
 	protectedSocialGroup := socialGroup.Group("")
-	protectedSocialGroup.Use(jwt.JWTAuth(accountRepository, cache))
+	protectedSocialGroup.Use(jwt.JWTAuth(cache))
 	{
 		protectedSocialGroup.POST("/follow", socialHandler.Follow)
 		protectedSocialGroup.POST("/unfollow", socialHandler.Unfollow)
@@ -128,19 +128,20 @@ func SetRouter(db *gorm.DB, cache *rediscache.Client, rmq *rabbitmq.RabbitMQ, em
 	feedService := feed.NewFeedService(feedRepository, likeRepository, cache)
 	feedHandler := feed.NewFeedHandler(feedService)
 	feedGroup := r.Group("/feed")
-	feedGroup.Use(jwt.SoftJWTAuth(accountRepository, cache))
+	feedGroup.Use(jwt.SoftJWTAuth(cache))
 	{
 		feedGroup.POST("/listLatest", feedHandler.ListLatest)
 		feedGroup.POST("/listLikesCount", feedHandler.ListLikesCount)
 		feedGroup.POST("/listByPopularity", feedHandler.ListByPopularity)
 	}
 	protectedFeedGroup := feedGroup.Group("")
-	protectedFeedGroup.Use(jwt.JWTAuth(accountRepository, cache))
+	protectedFeedGroup.Use(jwt.JWTAuth(cache))
 	{
 		protectedFeedGroup.POST("/listByFollowing", feedHandler.ListByFollowing)
 	}
+	search, err := skill.NewSearchTool()
 
-	AIChatService := agent.NewAIChatService(llm, skill.NewSearchVideoTool(emb, vectordb), skill.NewSearchWeatherTool())
+	AIChatService := agent.NewAIChatService(llm, skill.NewSearchVideoTool(vectordb, esClient), skill.NewSearchWeatherTool(), search)
 	AIChatHandler := agent.NewAIChatHandler(AIChatService)
 	AIGroup := r.Group("/ai")
 	AIGroup.POST("/chat", AIChatHandler.Chat)

@@ -198,9 +198,6 @@ func (as *AccountService) Login(ctx context.Context, username, password string) 
 	if err != nil {
 		return "", err
 	}
-	if err := as.accountRepository.Login(ctx, account.ID, token); err != nil {
-		return "", err
-	}
 	if as.cache != nil {
 		cacheCtx, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
 		defer cancel()
@@ -217,9 +214,6 @@ func (as *AccountService) Logout(ctx context.Context, accountID uint) error {
 	if err != nil {
 		return err
 	}
-	if account.Token == "" {
-		return nil
-	}
 	if as.cache != nil {
 		cacheCtx, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
 		defer cancel()
@@ -228,5 +222,5 @@ func (as *AccountService) Logout(ctx context.Context, accountID uint) error {
 			log.Printf("failed to del cache: %v", err)
 		}
 	}
-	return as.accountRepository.Logout(ctx, account.ID)
+	return nil
 }

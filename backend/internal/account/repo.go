@@ -70,17 +70,3 @@ func (ar *AccountRepository) FindByUsername(ctx context.Context, username string
 	}
 	return &account, nil
 }
-
-func (ar *AccountRepository) Login(ctx context.Context, id uint, token string) error {
-	if err := ar.db.WithContext(ctx).Model(&Account{}).Where("id = ?", id).Update("token", token).Error; err != nil {
-		return err
-	}
-	return nil
-}
-
-func (ar *AccountRepository) Logout(ctx context.Context, id uint) error {
-	if err := ar.db.WithContext(ctx).Model(&Account{}).Where("id = ?", id).Update("token", "").Error; err != nil {
-		return err
-	}
-	return nil
-}
